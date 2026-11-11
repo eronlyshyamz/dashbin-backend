@@ -1,18 +1,12 @@
 
 services:
   - type: web
-    name: smart-dustbin-api
+    name: dashbin-backend
     runtime: python
-
     buildCommand: pip install -r requirements.txt
-
-    startCommand: gunicorn app:app
-
-    healthCheckPath: /health
-
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DEVICE_API_KEY
         sync: false
-
       - key: OFFLINE_AFTER_SECONDS
-        value: "15"
+        value: "30"
