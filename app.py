@@ -1,25 +1,24 @@
 
 import os
+import math
 from datetime import datetime, timezone
 from threading import Lock
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 
 app = Flask(__name__)
 
-# Secret key from Render environment
 DEVICE_API_KEY = os.environ.get("DEVICE_API_KEY", "")
 
-# Device offline if no data arrives within 15 seconds
 OFFLINE_AFTER_SECONDS = int(
     os.environ.get("OFFLINE_AFTER_SECONDS", "15")
 )
 
 lock = Lock()
 
-# Latest sensor data
 latest_data = {
     "fill_level": None,
+    "distance": None,
     "full_alert": None,
     "lid_open": None,
     "buzzer_on": None,
@@ -44,35 +43,22 @@ def convert_bool(value):
     raise ValueError("Invalid boolean value")
 
 
-# --------------------------------
-# HOME API
-# --------------------------------
-
+# DASHBOARD
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({
-        "message": "Smart Dustbin Backend",
-        "status": "Running"
-    })
+    return render_template("index.html")
 
 
-# --------------------------------
 # HEALTH CHECK
-# --------------------------------
-
 @app.route("/health", methods=["GET"])
 def health():
-
     return jsonify({
         "ok": True,
         "server": "online"
     })
 
 
-# --------------------------------
 # RECEIVE ESP8266 DATA
-# --------------------------------
-
 @app.route("/api/data", methods=["POST"])
 def receive_data():
 
@@ -81,9 +67,7 @@ def receive_data():
             "error": "Server API key is not configured"
         }), 503
 
-    supplied_key = request.headers.get(
-        "X-Device-Key", ""
-    )
+    supplied_key = request.headers.get("X-Device-Key", "")
 
     if supplied_key != DEVICE_API_KEY:
         return jsonify({
@@ -100,14 +84,21 @@ def receive_data():
     try:
         fill = float(data["fill_level"])
 
-        if not 0 <= fill <= 100:
-            raise ValueError(
-                "Fill level must be between 0 and 100"
-            )
+        if not math.isfinite(fill) or not 0 <= fill <= 100:
+            raise ValueError("Fill level must be between 0 and 100")
 
         full_alert = convert_bool(data["full_alert"])
         lid_open = convert_bool(data["lid_open"])
         buzzer_on = convert_bool(data["buzzer_on"])
+
+        # Distance is optional until Arduino code is updated.
+        distance = data.get("distance")
+
+        if distance is not None:
+            distance = float(distance)
+
+            if not math.isfinite(distance) or not 0 <= distance <= 400:
+                raise ValueError("Invalid distance value")
 
     except KeyError as error:
         return jsonify({
@@ -124,6 +115,10 @@ def receive_data():
     with lock:
         latest_data.update({
             "fill_level": round(fill, 2),
+            "distance": (
+                round(distance, 2)
+                if distance is not None else None
+            ),
             "full_alert": full_alert,
             "lid_open": lid_open,
             "buzzer_on": buzzer_on,
@@ -137,10 +132,7 @@ def receive_data():
     }), 200
 
 
-# --------------------------------
 # SEND DATA TO DASHBOARD
-# --------------------------------
-
 @app.route("/api/status", methods=["GET"])
 def get_status():
 
@@ -150,10 +142,7 @@ def get_status():
     online = False
 
     if result["last_seen"] is not None:
-
-        last_seen = datetime.fromisoformat(
-            result["last_seen"]
-        )
+        last_seen = datetime.fromisoformat(result["last_seen"])
 
         elapsed = (
             current_time() - last_seen
@@ -166,12 +155,7 @@ def get_status():
     return jsonify(result)
 
 
-# --------------------------------
-# START SERVER
-# --------------------------------
-
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 5000))
 
     app.run(
