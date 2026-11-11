@@ -1,51 +1,243 @@
 
 import os
+import json
+import asyncio
 from datetime import datetime, timezone
-from threading import Lock
 
-from flask import Flask, jsonify, request, render_template_string
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
-app = Flask(__name__)
+app = FastAPI()
 
 DEVICE_API_KEY = os.environ.get("DEVICE_API_KEY", "")
 
-OFFLINE_AFTER_SECONDS = int(
-    os.environ.get("OFFLINE_AFTER_SECONDS", "75")
-)
-
-lock = Lock()
-
+# Latest device state (kept in memory)
 latest_data = {
     "fill_level": None,
     "distance": None,
-    "full_alert": None,
-    "lid_open": None,
-    "buzzer_on": None,
-    "last_seen": None
+    "full_alert": False,
+    "lid_open": False,
+    "buzzer_on": False,
+    "last_seen": None,
+    "online": False
 }
 
-
-def current_time():
-    return datetime.now(timezone.utc)
-
-
-def convert_bool(value):
-
-    if isinstance(value, bool):
-        return value
-
-    if value == 0:
-        return False
-
-    if value == 1:
-        return True
-
-    raise ValueError("Invalid boolean value")
+dashboard_clients = set()
+state_lock = asyncio.Lock()
 
 
-# ======================================
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def valid_bool(value):
+    return isinstance(value, bool)
+
+
+async def send_to_dashboards(payload):
+    message = json.dumps(payload)
+    disconnected = []
+
+    for client in list(dashboard_clients):
+        try:
+            await client.send_text(message)
+        except Exception:
+            disconnected.append(client)
+
+    for client in disconnected:
+        dashboard_clients.discard(client)
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "server": "online", "transport": "websocket"}
+
+
+@app.get("/api/status")
+async def status():
+    async with state_lock:
+        result = dict(latest_data)
+
+    if result["last_seen"]:
+        last_seen = datetime.fromisoformat(result["last_seen"])
+        elapsed = (
+            datetime.now(timezone.utc) - last_seen
+        ).total_seconds()
+        result["online"] = elapsed <= 30
+
+    return result
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return HTMLResponse(DASHBOARD_HTML)
+
+
+# =====================================
+# DEVICE WEBSOCKET
+# =====================================
+
+@app.websocket("/ws/device")
+async def device_socket(websocket: WebSocket):
+
+    await websocket.accept()
+
+    if not DEVICE_API_KEY:
+        await websocket.close(code=1011, reason="Device key not configured")
+        return
+
+    try:
+        # First message must authenticate the device.
+        auth_text = await asyncio.wait_for(
+            websocket.receive_text(),
+            timeout=10
+        )
+
+        auth = json.loads(auth_text)
+
+        if (
+            auth.get("type") != "auth"
+            or auth.get("key") != DEVICE_API_KEY
+        ):
+            await websocket.close(code=1008, reason="Unauthorized")
+            return
+
+        await websocket.send_json({
+            "type": "auth",
+            "ok": True,
+            "message": "Device authenticated"
+        })
+
+        while True:
+
+            raw_text = await websocket.receive_text()
+            data = json.loads(raw_text)
+
+            message_type = data.get("type")
+
+            if message_type == "heartbeat":
+
+                async with state_lock:
+                    latest_data["last_seen"] = utc_now()
+                    latest_data["online"] = True
+                    snapshot = dict(latest_data)
+
+                await send_to_dashboards({
+                    "type": "status",
+                    "data": snapshot
+                })
+
+                continue
+
+            if message_type != "data":
+                continue
+
+            fill = float(data["fill_level"])
+
+            if not 0 <= fill <= 100:
+                continue
+
+            distance = data.get("distance")
+
+            if distance is not None:
+                distance = float(distance)
+                if not 0 <= distance <= 400:
+                    continue
+
+            full_alert = data.get("full_alert")
+            lid_open = data.get("lid_open")
+            buzzer_on = data.get("buzzer_on")
+
+            if not all(
+                valid_bool(v)
+                for v in [full_alert, lid_open, buzzer_on]
+            ):
+                continue
+
+            received_time = utc_now()
+
+            async with state_lock:
+                latest_data.update({
+                    "fill_level": round(fill, 2),
+                    "distance": (
+                        round(distance, 2)
+                        if distance is not None
+                        else None
+                    ),
+                    "full_alert": full_alert,
+                    "lid_open": lid_open,
+                    "buzzer_on": buzzer_on,
+                    "last_seen": received_time,
+                    "online": True
+                })
+
+                snapshot = dict(latest_data)
+
+            # Push immediately to all connected dashboards.
+            await send_to_dashboards({
+                "type": "data",
+                "data": snapshot
+            })
+
+            await websocket.send_json({
+                "type": "ack",
+                "ok": True,
+                "received_at": received_time
+            })
+
+    except asyncio.TimeoutError:
+        await websocket.close(code=1008, reason="Authentication timeout")
+
+    except WebSocketDisconnect:
+        pass
+
+    except Exception:
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+
+
+# =====================================
+# DASHBOARD WEBSOCKET
+# =====================================
+
+@app.websocket("/ws/dashboard")
+async def dashboard_socket(websocket: WebSocket):
+
+    await websocket.accept()
+    dashboard_clients.add(websocket)
+
+    async with state_lock:
+        snapshot = dict(latest_data)
+
+    if snapshot["last_seen"]:
+        last_seen = datetime.fromisoformat(snapshot["last_seen"])
+        elapsed = (
+            datetime.now(timezone.utc) - last_seen
+        ).total_seconds()
+        snapshot["online"] = elapsed <= 30
+
+    await websocket.send_json({
+        "type": "status",
+        "data": snapshot
+    })
+
+    try:
+        # Keep the connection alive and detect disconnects.
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        dashboard_clients.discard(websocket)
+
+    except Exception:
+        dashboard_clients.discard(websocket)
+
+
+# =====================================
 # HTML DASHBOARD
-# ======================================
+# =====================================
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -53,19 +245,16 @@ DASHBOARD_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-
-<title>Smart Dustbin Dashboard</title>
+<title>Smart Dustbin Live Dashboard</title>
 
 <style>
-* {
-    box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
     margin: 0;
-    padding: 20px;
+    padding: 22px;
     background: #0b1220;
-    color: #ffffff;
+    color: white;
     font-family: Arial, sans-serif;
 }
 
@@ -74,59 +263,48 @@ body {
     margin: auto;
 }
 
-h1 {
-    margin-bottom: 5px;
-}
+h1 { margin-bottom: 5px; }
 
 .subtitle {
     color: #94a3b8;
-    margin-bottom: 25px;
+    margin-bottom: 22px;
 }
 
-.status {
-    padding: 15px;
-    border-radius: 12px;
+.status, .card {
     background: #172337;
-    margin-bottom: 20px;
+    border: 1px solid #26364f;
+    border-radius: 14px;
+    padding: 20px;
 }
 
-.online {
-    color: #22c55e;
-}
-
-.offline {
-    color: #ef4444;
-}
+.status { margin-bottom: 16px; }
 
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 15px;
-}
-
-.card {
-    background: #172337;
-    padding: 22px;
-    border-radius: 14px;
-    border: 1px solid #26364f;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px;
 }
 
 .card h3 {
     color: #94a3b8;
-    margin: 0 0 15px;
-    font-size: 15px;
+    font-size: 14px;
+    margin: 0 0 14px;
 }
 
 .value {
-    font-size: 30px;
+    font-size: 29px;
     font-weight: bold;
 }
+
+.online { color: #22c55e; }
+.offline { color: #ef4444; }
+.muted { color: #94a3b8; }
 
 .bar {
     height: 12px;
     background: #334155;
     border-radius: 20px;
-    margin-top: 15px;
+    margin-top: 14px;
     overflow: hidden;
 }
 
@@ -134,48 +312,37 @@ h1 {
     height: 100%;
     width: 0%;
     background: #22c55e;
-    transition: width 0.3s;
+    transition: width .12s linear;
 }
 
-.green {
-    color: #22c55e;
-}
-
-.red {
-    color: #ef4444;
-}
-
-.footer {
-    color: #64748b;
+.small {
+    color: #94a3b8;
     font-size: 13px;
-    margin-top: 25px;
+    margin-top: 15px;
 }
 </style>
 </head>
 
 <body>
-
 <div class="container">
 
 <h1>Smart Dustbin</h1>
-
-<p class="subtitle">Live IoT Monitoring Dashboard</p>
+<p class="subtitle">Real-time IoT Dashboard</p>
 
 <div class="status">
-    Device Status:
-    <strong id="online" class="offline">Checking...</strong>
+    Device: <strong id="device" class="offline">CONNECTING</strong>
     <br><br>
-    Last Update: <span id="lastSeen">Waiting...</span>
+    Dashboard: <strong id="connection" class="muted">CONNECTING</strong>
+    <br><br>
+    Last device update: <span id="lastSeen">Waiting for data</span>
 </div>
 
 <div class="grid">
 
     <div class="card">
-        <h3>Dustbin Fill Level</h3>
+        <h3>Fill Level</h3>
         <div class="value" id="fill">--%</div>
-        <div class="bar">
-            <div class="fill" id="fillBar"></div>
-        </div>
+        <div class="bar"><div class="fill" id="fillBar"></div></div>
     </div>
 
     <div class="card">
@@ -200,250 +367,91 @@ h1 {
 
 </div>
 
-<div class="footer">
-    Dashboard refreshes every 1 second.
-</div>
+<p class="small">
+    Values update when the device sends a new WebSocket message.
+</p>
 
 </div>
 
 <script>
+let socket;
+let reconnectDelay = 1000;
+let lastDeviceMessage = 0;
 
-function setState(id, value, isOn) {
-
-    const element = document.getElementById(id);
-
-    element.textContent = value;
-
-    element.className =
-        "value " + (isOn ? "green" : "red");
+function setValue(id, text, active) {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = "value " + (active ? "online" : "offline");
 }
 
-async function updateDashboard() {
+function showData(data) {
+    document.getElementById("fill").textContent =
+        data.fill_level === null ? "--%" :
+        Number(data.fill_level).toFixed(1) + "%";
 
-    try {
+    document.getElementById("fillBar").style.width =
+        data.fill_level === null ? "0%" :
+        Math.max(0, Math.min(100, Number(data.fill_level))) + "%";
 
-        const response = await fetch(
-            "/api/status?_=" + Date.now(),
-            { cache: "no-store" }
-        );
+    document.getElementById("distance").textContent =
+        data.distance === null ? "-- cm" :
+        Number(data.distance).toFixed(1) + " cm";
 
-        if (!response.ok) {
-            throw new Error("Server response error");
-        }
+    setValue("lid", data.lid_open ? "OPEN" : "CLOSED", data.lid_open);
+    setValue("buzzer", data.buzzer_on ? "ON" : "OFF", data.buzzer_on);
+    setValue("alert", data.full_alert ? "FULL" : "NORMAL", data.full_alert);
 
-        const data = await response.json();
-
-        const online = document.getElementById("online");
-
-        online.textContent =
-            data.online ? "ONLINE" : "OFFLINE";
-
-        online.className =
-            data.online ? "online" : "offline";
-
-        document.getElementById("fill").textContent =
-            data.fill_level === null
-            ? "--%"
-            : Number(data.fill_level).toFixed(1) + "%";
-
-        document.getElementById("fillBar").style.width =
-            data.fill_level === null
-            ? "0%"
-            : Math.max(0, Math.min(100, data.fill_level)) + "%";
-
-        document.getElementById("distance").textContent =
-            data.distance === null
-            ? "-- cm"
-            : Number(data.distance).toFixed(1) + " cm";
-
-        setState(
-            "lid",
-            data.lid_open ? "OPEN" : "CLOSED",
-            data.lid_open
-        );
-
-        setState(
-            "buzzer",
-            data.buzzer_on ? "ON" : "OFF",
-            data.buzzer_on
-        );
-
-        setState(
-            "alert",
-            data.full_alert ? "FULL" : "NORMAL",
-            data.full_alert
-        );
-
+    if (data.last_seen) {
         document.getElementById("lastSeen").textContent =
-            data.last_seen
-            ? new Date(data.last_seen).toLocaleTimeString()
-            : "No data received";
-
+            new Date(data.last_seen).toLocaleTimeString();
     }
 
-    catch (error) {
-
-        document.getElementById("online").textContent =
-            "SERVER ERROR";
-
-        document.getElementById("online").className =
-            "offline";
-    }
+    lastDeviceMessage = Date.now();
+    updateDeviceStatus();
 }
 
-updateDashboard();
-setInterval(updateDashboard, 1000);
+function updateDeviceStatus() {
+    const el = document.getElementById("device");
+    const online = lastDeviceMessage &&
+                   (Date.now() - lastDeviceMessage < 30000);
 
+    el.textContent = online ? "ONLINE" : "OFFLINE";
+    el.className = online ? "online" : "offline";
+}
+
+function connect() {
+    const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+    socket = new WebSocket(scheme + location.host + "/ws/dashboard");
+
+    socket.onopen = () => {
+        reconnectDelay = 1000;
+        document.getElementById("connection").textContent = "CONNECTED";
+        document.getElementById("connection").className = "online";
+    };
+
+    socket.onmessage = (event) => {
+        try {
+            const message = JSON.parse(event.data);
+            if (message.data) showData(message.data);
+        } catch (e) {
+            console.error("Invalid dashboard message", e);
+        }
+    };
+
+    socket.onclose = () => {
+        document.getElementById("connection").textContent = "DISCONNECTED";
+        document.getElementById("connection").className = "offline";
+        setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+    };
+
+    socket.onerror = () => socket.close();
+}
+
+setInterval(updateDeviceStatus, 1000);
+connect();
 </script>
-
 </body>
 </html>
 """
 
-
-# ======================================
-# HOME DASHBOARD
-# ======================================
-
-@app.route("/", methods=["GET"])
-def home():
-    return render_template_string(DASHBOARD_HTML)
-
-
-# ======================================
-# HEALTH CHECK
-# ======================================
-
-@app.route("/health", methods=["GET"])
-def health():
-
-    return jsonify({
-        "ok": True,
-        "server": "online"
-    })
-
-
-# ======================================
-# RECEIVE DEVICE DATA
-# ======================================
-
-@app.route("/api/data", methods=["POST"])
-def receive_data():
-
-    if not DEVICE_API_KEY:
-        return jsonify({
-            "error": "Server API key is not configured"
-        }), 503
-
-    supplied_key = request.headers.get(
-        "X-Device-Key", ""
-    )
-
-    if supplied_key != DEVICE_API_KEY:
-        return jsonify({
-            "error": "Unauthorized"
-        }), 401
-
-    data = request.get_json(silent=True)
-
-    if not isinstance(data, dict):
-        return jsonify({
-            "error": "Invalid JSON data"
-        }), 400
-
-    try:
-
-        fill = float(data["fill_level"])
-
-        if not 0 <= fill <= 100:
-            raise ValueError("Fill level must be between 0 and 100")
-
-        distance = data.get("distance")
-
-        if distance is not None:
-            distance = float(distance)
-
-            if not 0 <= distance <= 400:
-                raise ValueError("Invalid distance")
-
-        full_alert = convert_bool(data["full_alert"])
-        lid_open = convert_bool(data["lid_open"])
-        buzzer_on = convert_bool(data["buzzer_on"])
-
-    except KeyError as error:
-
-        return jsonify({
-            "error": "Missing field: " + str(error)
-        }), 400
-
-    except (ValueError, TypeError) as error:
-
-        return jsonify({
-            "error": str(error)
-        }), 400
-
-    received_time = current_time().isoformat()
-
-    with lock:
-
-        latest_data.update({
-            "fill_level": round(fill, 2),
-            "distance": (
-                round(distance, 2)
-                if distance is not None
-                else None
-            ),
-            "full_alert": full_alert,
-            "lid_open": lid_open,
-            "buzzer_on": buzzer_on,
-            "last_seen": received_time
-        })
-
-    return jsonify({
-        "success": True,
-        "message": "Data received successfully",
-        "received_at": received_time
-    }), 200
-
-
-# ======================================
-# DASHBOARD STATUS API
-# ======================================
-
-@app.route("/api/status", methods=["GET"])
-def get_status():
-
-    with lock:
-        result = dict(latest_data)
-
-    online = False
-
-    if result["last_seen"] is not None:
-
-        last_seen = datetime.fromisoformat(
-            result["last_seen"]
-        )
-
-        elapsed = (
-            current_time() - last_seen
-        ).total_seconds()
-
-        online = elapsed <= OFFLINE_AFTER_SECONDS
-
-    result["online"] = online
-
-    return jsonify(result)
-
-
-# ======================================
-# START SERVER
-# ======================================
-
-if __name__ == "__main__":
-
-    port = int(os.environ.get("PORT", 5000))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
