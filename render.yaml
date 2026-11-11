@@ -1,0 +1,18 @@
+
+services:
+  - type: web
+    name: smart-dustbin-api
+    runtime: python
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: gunicorn server:app
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: DEVICE_API_KEY
+        sync: false
+
+      - key: OFFLINE_AFTER_SECONDS
+        value: "15"
