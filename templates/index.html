@@ -1,0 +1,219 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Dustbin Dashboard</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #101827;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            max-width: 850px;
+            margin: auto;
+        }
+
+        h1 {
+            margin-bottom: 5px;
+        }
+
+        .subtitle {
+            color: #9caac0;
+            margin-bottom: 25px;
+        }
+
+        .status {
+            padding: 12px;
+            border-radius: 10px;
+            background: #263449;
+            margin-bottom: 18px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+
+        .card {
+            background: #1c293b;
+            border: 1px solid #34445b;
+            border-radius: 14px;
+            padding: 20px;
+        }
+
+        .card p {
+            color: #aab7ca;
+            margin: 0 0 12px;
+        }
+
+        .value {
+            font-size: 27px;
+            font-weight: bold;
+        }
+
+        .bar {
+            height: 10px;
+            background: #34445b;
+            border-radius: 20px;
+            margin-top: 15px;
+            overflow: hidden;
+        }
+
+        #fillBar {
+            height: 100%;
+            width: 0%;
+            background: #39c98a;
+            transition: width 0.3s;
+        }
+
+        .footer {
+            color: #9caac0;
+            margin-top: 20px;
+            font-size: 13px;
+        }
+
+        @media (max-width: 500px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+
+    <h1>Smart Dustbin</h1>
+    <div class="subtitle">Live Monitoring Dashboard</div>
+
+    <div class="status">
+        Device: <strong id="online">Checking...</strong>
+    </div>
+
+    <div class="grid">
+
+        <div class="card">
+            <p>Fill Level</p>
+            <div class="value" id="fill">--%</div>
+            <div class="bar">
+                <div id="fillBar"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <p>Distance</p>
+            <div class="value" id="distance">-- cm</div>
+        </div>
+
+        <div class="card">
+            <p>Lid Status</p>
+            <div class="value" id="lid">--</div>
+        </div>
+
+        <div class="card">
+            <p>Buzzer</p>
+            <div class="value" id="buzzer">--</div>
+        </div>
+
+        <div class="card">
+            <p>Full Alert</p>
+            <div class="value" id="alert">--</div>
+        </div>
+
+        <div class="card">
+            <p>Last Data Received</p>
+            <div class="value" id="lastSeen" style="font-size:16px">--</div>
+        </div>
+
+    </div>
+
+    <div class="footer">
+        <span id="connection">Connecting to server...</span>
+        <br><br>
+        Dashboard refreshes every second.
+    </div>
+
+</div>
+
+<script>
+    async function updateDashboard() {
+        try {
+            const response = await fetch(
+                "/api/status",
+                { cache: "no-store" }
+            );
+
+            if (!response.ok) {
+                throw new Error("Server response error");
+            }
+
+            const data = await response.json();
+
+            document.getElementById("online").textContent =
+                data.online ? "ONLINE" : "OFFLINE";
+
+            document.getElementById("fill").textContent =
+                data.fill_level === null
+                    ? "--%"
+                    : data.fill_level + "%";
+
+            document.getElementById("fillBar").style.width =
+                data.fill_level === null
+                    ? "0%"
+                    : data.fill_level + "%";
+
+            document.getElementById("distance").textContent =
+                data.distance === null
+                    ? "-- cm"
+                    : data.distance + " cm";
+
+            document.getElementById("lid").textContent =
+                data.lid_open === null
+                    ? "--"
+                    : data.lid_open ? "OPEN" : "CLOSED";
+
+            document.getElementById("buzzer").textContent =
+                data.buzzer_on === null
+                    ? "--"
+                    : data.buzzer_on ? "ON" : "OFF";
+
+            document.getElementById("alert").textContent =
+                data.full_alert === null
+                    ? "--"
+                    : data.full_alert ? "ACTIVE" : "NORMAL";
+
+            document.getElementById("lastSeen").textContent =
+                data.last_seen
+                    ? new Date(data.last_seen).toLocaleTimeString()
+                    : "No data received";
+
+            document.getElementById("connection").textContent =
+                "Connected to backend";
+
+        } catch (error) {
+            document.getElementById("online").textContent =
+                "SERVER ERROR";
+
+            document.getElementById("connection").textContent =
+                "Could not fetch data from server";
+        }
+    }
+
+    updateDashboard();
+    setInterval(updateDashboard, 1000);
+</script>
+
+</body>
+</html>
