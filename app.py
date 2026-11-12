@@ -642,7 +642,7 @@ let latestLastSeen = null;
 
 function setFill(value) {
   const fill = Math.max(0, Math.min(100, Number(value) || 0));
-  const isFull = fill >= 70;
+  const isFull = fill >= 60;
   $("fillValue").textContent = Math.round(fill);
   $("gauge").style.setProperty("--level", fill + "%");
   $("gauge").style.setProperty("--fill-color", isFull ? "#ff263d" : "#39e66b");
@@ -656,7 +656,7 @@ function setLid(open) {
 
 function setFull(alertOn, buzzerOn) {
   const active = !!alertOn || !!buzzerOn ||
-                 Number($("fillValue").textContent) >= 70;
+                 Number($("fillValue").textContent) >= 60;
   $("siren").classList.toggle("active", active);
   $("fullText").textContent = active ? "BIN FULL · ALERT ON" : "NORMAL";
   $("fullText").classList.toggle("active", active);
