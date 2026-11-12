@@ -300,16 +300,32 @@ body {
   transition: height 1.7s cubic-bezier(.2,.7,.2,1), background 1s ease;
   z-index: 1;
 }
-.liquid::before {
+.liquid::before,
+.liquid::after {
   content: "";
   position: absolute;
-  left: -10%;
-  top: -13px;
-  width: 120%;
-  height: 26px;
-  border-radius: 50%;
-  background: rgba(255,255,255,.38);
-  filter: blur(7px);
+  left: -35%;
+  top: -15px;
+  width: 170%;
+  height: 30px;
+  border-radius: 42%;
+  background: rgba(255,255,255,.48);
+  filter: blur(2px);
+  animation: waterWave 4.2s linear infinite;
+}
+.liquid::after {
+  top: -10px;
+  left: -25%;
+  width: 150%;
+  height: 24px;
+  border-radius: 45%;
+  opacity: .48;
+  animation: waterWave 6s linear infinite reverse;
+}
+@keyframes waterWave {
+  0%   { transform: translateX(-12%) rotate(0deg); }
+  50%  { transform: translateX(12%) rotate(5deg); }
+  100% { transform: translateX(-12%) rotate(0deg); }
 }
 .gauge-copy {
   position: absolute;
@@ -394,24 +410,35 @@ body {
   height: 112px;
   display: grid;
   place-items: center;
+  position: relative;
   border-radius: 25px;
   background: #edf1f6;
   transition: background .35s ease, box-shadow .35s ease;
 }
-.siren-wrap svg { width: 90px; height: 90px; }
+.siren-wrap svg { width: 90px; height: 90px; position: relative; z-index: 2; transform-origin: 50% 78%; }
 .siren-light { fill: #9da7b5; transition: fill .3s ease; }
 .siren-rays { stroke: #8995a5; transition: stroke .3s ease; }
 .siren-wrap.active {
   background: #fff0f1;
-  box-shadow: 0 0 0 5px rgba(255,53,72,.13);
-  animation: alertPulse .8s infinite alternate;
+  box-shadow: 0 0 22px rgba(255,35,55,.42), 0 0 0 5px rgba(255,53,72,.13);
+  animation: sirenFlash .48s steps(2, end) infinite;
 }
-.siren-wrap.active .siren-light { fill: #ff263d; }
-.siren-wrap.active .siren-rays { stroke: #ff263d; }
-@keyframes alertPulse {
-  from { box-shadow: 0 0 0 3px rgba(255,53,72,.10); }
-  to { box-shadow: 0 0 0 11px rgba(255,53,72,.22); }
+.siren-wrap.active::before,
+.siren-wrap.active::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 3px solid rgba(255,35,55,.55);
+  border-radius: 50%;
+  animation: sirenRings 1.15s ease-out infinite;
 }
+.siren-wrap.active::after { animation-delay: .57s; }
+.siren-wrap.active svg { animation: sirenShake .22s linear infinite; }
+.siren-wrap.active .siren-light { fill: #ff102b; filter: drop-shadow(0 0 7px #ff243d); }
+.siren-wrap.active .siren-rays { stroke: #ff102b; filter: drop-shadow(0 0 4px #ff243d); }
+@keyframes sirenFlash { 0%, 100% { background: #fff0f1; } 50% { background: #ffd5da; } }
+@keyframes sirenRings { 0% { transform: scale(.72); opacity: .9; } 100% { transform: scale(1.45); opacity: 0; } }
+@keyframes sirenShake { 0%, 100% { transform: rotate(-2deg); } 50% { transform: rotate(2deg); } }
 .alert-text {
   font-size: 14px;
   font-weight: 900;
@@ -447,11 +474,28 @@ body {
   height: 210px;
   border-radius: 50%;
   object-fit: cover;
+  object-position: center 42%;
   background: #dce8f5;
   border: 6px solid #fff;
-  box-shadow: 0 8px 22px rgba(22,34,54,.14);
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 12px 28px rgba(22,34,54,.18), 0 0 28px rgba(67,148,255,.22);
+  animation: profileFloat 4.2s ease-in-out infinite, photoGlow 3.2s ease-in-out infinite alternate;
 }
+.profile { animation: profileReveal .9s cubic-bezier(.2,.75,.25,1) both; }
+.profile > div { animation: profileTextReveal 1s .15s cubic-bezier(.2,.75,.25,1) both; }
 .profile-name {
+  animation: nameReveal 1s .25s cubic-bezier(.16,1,.3,1) both;
+  transform-origin: left center;
+}
+@keyframes profileFloat { 0%,100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-10px) rotate(1deg); } }
+@keyframes photoGlow {
+  from { box-shadow: 0 10px 24px rgba(22,34,54,.16), 0 0 18px rgba(67,148,255,.18); }
+  to { box-shadow: 0 15px 34px rgba(22,34,54,.20), 0 0 38px rgba(67,148,255,.42); }
+}
+@keyframes profileReveal { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes profileTextReveal { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes nameReveal { from { opacity: 0; transform: translateY(15px) scale(.96); letter-spacing: 2px; } to { opacity: 1; transform: translateY(0) scale(1); } }
   font-size: clamp(32px, 6vw, 58px);
   font-weight: 950;
   line-height: 1.05;
@@ -509,6 +553,9 @@ body {
   .profile-photo { width: 108px; height: 108px; border-width: 4px; }
   .profile-name { letter-spacing: -.8px; }
   .profile-details { font-size: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 </style>
 </head>
@@ -608,7 +655,8 @@ function setLid(open) {
 }
 
 function setFull(alertOn, buzzerOn) {
-  const active = !!alertOn || !!buzzerOn;
+  const active = !!alertOn || !!buzzerOn ||
+                 Number($("fillValue").textContent) >= 70;
   $("siren").classList.toggle("active", active);
   $("fullText").textContent = active ? "BIN FULL · ALERT ON" : "NORMAL";
   $("fullText").classList.toggle("active", active);
